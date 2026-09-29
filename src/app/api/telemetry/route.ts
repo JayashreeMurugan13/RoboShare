@@ -6,21 +6,28 @@ declare global {
   var __roboshare_telemetry: TelemetryData & { lastUpdated: number };
 }
 
-// Default fallback telemetry state
+// Clean zero-mock fallback telemetry state
 const DEFAULT_TELEMETRY: TelemetryData & { lastUpdated: number } = {
-  accelX: 0.42,
-  accelY: -0.05,
-  accelZ: 0.98,
-  gyroX: 0.02,
-  gyroY: -0.01,
-  gyroZ: 0.04,
-  tempC: 38.4,
-  storageUsedGB: 3.80,
+  accelX: 0,
+  accelY: 0,
+  accelZ: 0,
+  gyroX: 0,
+  gyroY: 0,
+  gyroZ: 0,
+  tempC: 0,
+  storageUsedGB: 0,
   storageTotalGB: 32.0,
-  batteryPct: 92,
+  batteryPct: 100,
   deviceName: "Neurick-ESP32-S3",
   firmware: "v1.12-MPU",
   isBoardConnected: false,
+  restingGravity: 0,
+  rawX: 0,
+  rawY: 0,
+  rawZ: 0,
+  motionIntensity: 0,
+  storageKb: 0,
+  maxStorageKb: 1000,
   lastUpdated: 0,
 };
 
@@ -31,11 +38,13 @@ if (!globalThis.__roboshare_telemetry) {
 /**
  * GET /api/telemetry
  * Returns the latest live telemetry from the Neurick ESP32 board.
- * If no packet has been received in the last 4 seconds, marks isBoardConnected: false.
+ * If no packet has been received in the last 1.5 seconds, marks isBoardConnected: false instantly.
  */
 export async function GET() {
   const current = globalThis.__roboshare_telemetry;
-  const isFresh = Date.now() - current.lastUpdated < 4000;
+  
+  // Strict 1.5-second threshold: if Python bridge stops or crashes, UI flips to disconnected immediately
+  const isFresh = Date.now() - current.lastUpdated < 1500;
 
   return NextResponse.json({
     ...current,
@@ -45,60 +54,51 @@ export async function GET() {
 
 /**
  * POST /api/telemetry
- * Receives JSON telemetry data directly from the Neurick ESP32 over local Wi-Fi.
- * 
- * Payload format:
- * {
- *   "accelX": 0.42,
- *   "accelY": -0.05,
- *   "accelZ": 0.98,
- *   "gyroX": 0.02,
- *   "gyroY": -0.01,
- *   "gyroZ": 0.04,
- *   "tempC": 38.4,
- *   "storageUsedGB": 3.8,
- *   "storageTotalGB": 32.0,
- *   "batteryPct": 92
- * }
+ * Receives JSON telemetry data directly from the Neurick ESP32 over local Wi-Fi or COM12 bridge.
  */
 export async function POST(req: NextRequest) {
   try {
     const data = await req.json();
 
-    const ax = typeof data.accelX === "number" ? data.accelX : 0;
-    const ay = typeof data.accelY === "number" ? data.accelY : 0;
-    const az = typeof data.accelZ === "number" ? data.accelZ : 0.98;
-    const mag = Math.sqrt(ax * ax + ay * ay + az * az);
-    const isShaking = Math.abs(mag - 1.0) > 0.35 || mag > 1.35;
+    const ax = typeof data.accelX === "number" ? data.accelX : (globalThis.__roboshare_telemetry?.accelX ?? 0);
+    const ay = typeof data.accelY === "number" ? data.accelY : (globalThis.__roboshare_telemetry?.accelY ?? 0);
+    const az = typeof data.accelZ === "number" ? data.accelZ : (globalThis.__roboshare_telemetry?.accelZ ?? 0);
+    const mag = typeof data.motionIntensity === "number" ? data.motionIntensity : Math.sqrt(ax * ax + ay * ay + az * az);
+    const isShaking = data.isShaking !== undefined ? Boolean(data.isShaking) : (mag > 20000 || Math.abs(mag - 1.0) > 0.35);
 
-    let storage = typeof data.storageUsedGB === "number"
+    let storageUsedGB = typeof data.storageUsedGB === "number"
       ? data.storageUsedGB
-      : (globalThis.__roboshare_telemetry?.storageUsedGB ?? 3.80);
-
-    // If physical shake is detected from MPU6050, increase storage capacity (simulating recorded sensor data)
-    if (isShaking && typeof data.storageUsedGB !== "number") {
-      storage = Math.min(32.0, storage + 0.35 * Math.max(1, mag));
-    }
+      : (data.storageKb !== undefined ? parseFloat(((data.storageKb / 1000.0) * 32.0).toFixed(2)) : (globalThis.__roboshare_telemetry?.storageUsedGB ?? 0));
 
     if (data.resetStorage) {
-      storage = 3.80;
+      storageUsedGB = 0;
     }
+
+    // Allow explicit disconnect command from bridge script
+    const forceConnected = data.isBoardConnected !== undefined ? Boolean(data.isBoardConnected) : true;
 
     globalThis.__roboshare_telemetry = {
       accelX: ax,
       accelY: ay,
       accelZ: az,
-      gyroX: typeof data.gyroX === "number" ? data.gyroX : 0,
-      gyroY: typeof data.gyroY === "number" ? data.gyroY : 0,
-      gyroZ: typeof data.gyroZ === "number" ? data.gyroZ : 0,
-      tempC: typeof data.tempC === "number" ? data.tempC : 38.0,
-      storageUsedGB: parseFloat(storage.toFixed(2)),
+      gyroX: typeof data.gyroX === "number" ? data.gyroX : (globalThis.__roboshare_telemetry?.gyroX ?? 0),
+      gyroY: typeof data.gyroY === "number" ? data.gyroY : (globalThis.__roboshare_telemetry?.gyroY ?? 0),
+      gyroZ: typeof data.gyroZ === "number" ? data.gyroZ : (globalThis.__roboshare_telemetry?.gyroZ ?? 0),
+      tempC: typeof data.tempC === "number" ? data.tempC : (globalThis.__roboshare_telemetry?.tempC ?? 0),
+      storageUsedGB: parseFloat(storageUsedGB.toFixed(2)),
       storageTotalGB: typeof data.storageTotalGB === "number" ? data.storageTotalGB : 32.0,
-      batteryPct: typeof data.batteryPct === "number" ? data.batteryPct : 90,
+      batteryPct: typeof data.batteryPct === "number" ? data.batteryPct : 100,
       deviceName: data.deviceName || "Neurick-ESP32-S3",
       firmware: data.firmware || "v1.12-MPU",
-      isBoardConnected: true,
-      lastUpdated: Date.now(),
+      isBoardConnected: forceConnected,
+      restingGravity: typeof data.restingGravity === "number" ? data.restingGravity : globalThis.__roboshare_telemetry.restingGravity,
+      rawX: typeof data.rawX === "number" ? data.rawX : globalThis.__roboshare_telemetry.rawX,
+      rawY: typeof data.rawY === "number" ? data.rawY : globalThis.__roboshare_telemetry.rawY,
+      rawZ: typeof data.rawZ === "number" ? data.rawZ : globalThis.__roboshare_telemetry.rawZ,
+      motionIntensity: typeof data.motionIntensity === "number" ? data.motionIntensity : globalThis.__roboshare_telemetry.motionIntensity,
+      storageKb: typeof data.storageKb === "number" ? data.storageKb : globalThis.__roboshare_telemetry.storageKb,
+      maxStorageKb: typeof data.maxStorageKb === "number" ? data.maxStorageKb : 1000,
+      lastUpdated: forceConnected ? Date.now() : 0, // If explicitly disconnected, zero out timestamp
     };
 
     return NextResponse.json({

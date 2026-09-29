@@ -24,6 +24,13 @@ export interface TelemetryData {
   deviceName: string;
   firmware: string;
   isBoardConnected: boolean;
+  restingGravity?: number;
+  rawX?: number;
+  rawY?: number;
+  rawZ?: number;
+  motionIntensity?: number;
+  storageKb?: number;
+  maxStorageKb?: number;
 }
 
 export interface HostNode {

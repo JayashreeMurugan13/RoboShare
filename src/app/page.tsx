@@ -10,6 +10,7 @@ import { MarketplacePanel } from "@/components/MarketplacePanel";
 import { BlockchainPanel } from "@/components/BlockchainPanel";
 import { MstExplorerModal } from "@/components/MstExplorerModal";
 import { PresentationGuideModal } from "@/components/PresentationGuideModal";
+import { CommandPromptTerminal } from "@/components/CommandPromptTerminal";
 import {
   getRealNetworkInfo,
   fetchRealWifiPeers,
@@ -53,21 +54,28 @@ export default function Home() {
   const [isExplorerOpen, setIsExplorerOpen] = useState(false);
   const [isDemoGuideOpen, setIsDemoGuideOpen] = useState(false);
 
-  // Hardware Telemetry state (Neurick ESP32-S3 + MPU6050)
+  // Hardware Telemetry state — starts at zero; exclusively updated by live COM12 serial stream via Python bridge
   const [telemetry, setTelemetry] = useState<TelemetryData>({
-    accelX: 0.42,
-    accelY: -0.05,
-    accelZ: 0.98,
-    gyroX: 0.02,
-    gyroY: -0.01,
-    gyroZ: 0.04,
-    tempC: 38.4,
-    storageUsedGB: 28.48, // Nearing capacity to trigger Wi-Fi discovery
+    accelX: 0,
+    accelY: 0,
+    accelZ: 0,
+    gyroX: 0,
+    gyroY: 0,
+    gyroZ: 0,
+    tempC: 0,
+    storageUsedGB: 0,
     storageTotalGB: 32.0,
-    batteryPct: 92,
+    batteryPct: 100,
     deviceName: "Neurick-ESP32-S3",
     firmware: "v1.12-MPU",
-    isBoardConnected: true,
+    isBoardConnected: false,
+    restingGravity: 0,
+    rawX: 0,
+    rawY: 0,
+    rawZ: 0,
+    motionIntensity: 0,
+    storageKb: 0,
+    maxStorageKb: 1000,
   });
 
   const [autoClimb, setAutoClimb] = useState<boolean>(false);
@@ -118,8 +126,8 @@ export default function Home() {
   const [currentChunkIndex, setCurrentChunkIndex] = useState<number>(0);
   const [overallTransferProgress, setOverallTransferProgress] = useState<number>(0);
 
-  // Final mined blockchain transaction hash
-  const [finalTxHash, setFinalTxHash] = useState<string | undefined>("0x823ec1b9a53e69d9ede1014afcfa1245c4ef2c36ea1ccad731db21d5cbd96f19");
+  // Final mined blockchain transaction hash (only populated when real on-chain tx is received)
+  const [finalTxHash, setFinalTxHash] = useState<string | undefined>(undefined);
 
   // Member 3 & 4 Bridge Status (Physical Shake Progress & Final on-chain Tx)
   const [bridgeStatus, setBridgeStatus] = useState<{
@@ -130,11 +138,13 @@ export default function Home() {
     txHash?: string;
     blockNumber?: number;
     message?: string;
+    terminalLogs?: string[];
   }>({
     shakingProgress: 0,
     isShaking: false,
     shakeIntensity: 0.98,
     status: "IDLE",
+    terminalLogs: [],
   });
 
   // Blockchain Audit Ledger with fullTxHash for clickable MSTScan links
@@ -287,17 +297,19 @@ export default function Home() {
     }
   };
 
-  // Automated Network Scan trigger when robot storage reaches capacity
+  // Automated Network Scan trigger when robot storage reaches 85% of real hardware capacity
   useEffect(() => {
-    if (telemetry.storageUsedGB >= 28.0 && !hasTriggeredCapacityScan.current && !isScanningWifi) {
+    const threshold = (telemetry.maxStorageKb ?? 1000) * 0.85;
+    if ((telemetry.storageKb ?? 0) >= threshold && !hasTriggeredCapacityScan.current && !isScanningWifi) {
       hasTriggeredCapacityScan.current = true;
+      const pct = Math.round(((telemetry.storageKb ?? 0) / (telemetry.maxStorageKb ?? 1000)) * 100);
       handleTriggerWifiScan(
-        `⚡ Storage capacity warning (${telemetry.storageUsedGB.toFixed(1)}/32 GB) — initiating Wi-Fi discovery for friend's host...`
+        `⚡ Storage capacity warning (${telemetry.storageKb} KB / ${telemetry.maxStorageKb} KB · ${pct}%) — initiating Wi-Fi discovery for friend's host...`
       );
     }
-  }, [telemetry.storageUsedGB, isScanningWifi]);
+  }, [telemetry.storageKb, telemetry.maxStorageKb, isScanningWifi]);
 
-  // Member 3 & 4 Real-Time Bridge Polling (Physical Shake Progress & Final on-chain Tx)
+  // Member 3 & 4 Real-Time Bridge Polling (Physical Shake Progress, COM12 metrics, & Final on-chain Tx)
   useEffect(() => {
     const bridgePoller = setInterval(async () => {
       try {
@@ -309,18 +321,28 @@ export default function Home() {
             setFinalTxHash(data.txHash);
           }
 
-          // Shaking physical Neurick hardware increases Local Memory Capacity!
-          if (data.shakingProgress > 0 || data.isShaking) {
-            setTelemetry((prev) => {
-              // Scale from 3.80 GB (12% baseline) to 28.50 GB (critical threshold) based on physical shake progress
-              const mappedStorage = 3.8 + (data.shakingProgress / 100) * (28.5 - 3.8);
-              const target = Math.max(prev.storageUsedGB, mappedStorage);
-              return {
-                ...prev,
-                storageUsedGB: parseFloat(Math.min(prev.storageTotalGB, target).toFixed(2)),
-              };
-            });
-          }
+          // Always ingest hardware fields — isBoardConnected is taken strictly from API response
+          setTelemetry((prev) => {
+            const kb = typeof data.storageKb === "number" ? data.storageKb : prev.storageKb;
+            const maxKb = typeof data.maxStorageKb === "number" ? data.maxStorageKb : (prev.maxStorageKb || 1000);
+            const mappedGB = typeof kb === "number" ? parseFloat(((kb / maxKb) * 32.0).toFixed(2)) : prev.storageUsedGB;
+
+            return {
+              ...prev,
+              // Only overwrite motion fields if the board is genuinely streaming
+              ...(data.accelX !== undefined && { accelX: data.accelX }),
+              ...(data.accelY !== undefined && { accelY: data.accelY }),
+              ...(data.accelZ !== undefined && { accelZ: data.accelZ }),
+              ...(data.rawX !== undefined && { rawX: data.rawX }),
+              ...(data.rawY !== undefined && { rawY: data.rawY }),
+              ...(data.rawZ !== undefined && { rawZ: data.rawZ }),
+              ...(data.restingGravity !== undefined && { restingGravity: data.restingGravity }),
+              ...(data.motionIntensity !== undefined && { motionIntensity: data.motionIntensity }),
+              ...(typeof kb === "number" && { storageKb: kb, maxStorageKb: maxKb, storageUsedGB: mappedGB }),
+              // Connection badge is ALWAYS driven by the API payload, never hardcoded
+              isBoardConnected: data.isBoardConnected === true,
+            };
+          });
 
           if (data.shakingProgress >= 100 && !isOffloading) {
             handleTriggerOffload();
@@ -329,139 +351,56 @@ export default function Home() {
       } catch {
         // Ignore
       }
-    }, 350);
+    }, 200);
 
     return () => clearInterval(bridgePoller);
   }, [isOffloading]);
 
-  // Live MPU6050 sensor polling with seamless simulation fallback
+  // Direct MPU6050 physical telemetry sync — isBoardConnected is written for BOTH states
   useEffect(() => {
-    let isPhysicalBoardActive = false;
-
-    // Check physical board telemetry stream every 400ms
     const boardPoller = setInterval(async () => {
       try {
         const res = await fetch("/api/telemetry");
         if (res.ok) {
           const data = await res.json();
-          if (data.isBoardConnected) {
-            isPhysicalBoardActive = true;
-
-            // Detect physical board shake magnitude from MPU6050
-            const mag = Math.sqrt(
-              (data.accelX || 0) ** 2 +
-              (data.accelY || 0) ** 2 +
-              (data.accelZ || 0) ** 2
-            );
-            const isPhysicalShake = Math.abs(mag - 1.0) > 0.35 || mag > 1.35;
-
-            setTelemetry((prev) => {
-              let newStorage = typeof data.storageUsedGB === "number" ? data.storageUsedGB : prev.storageUsedGB;
-
-              // If physical shake detected on hardware, increase Local Memory Capacity!
-              if (isPhysicalShake) {
-                newStorage = Math.min(prev.storageTotalGB, prev.storageUsedGB + 0.35 * Math.max(1, mag));
-              }
-
-              return {
-                ...prev,
-                accelX: data.accelX,
-                accelY: data.accelY,
-                accelZ: data.accelZ,
-                gyroX: data.gyroX ?? prev.gyroX,
-                gyroY: data.gyroY ?? prev.gyroY,
-                gyroZ: data.gyroZ ?? prev.gyroZ,
-                tempC: data.tempC,
-                storageUsedGB: parseFloat(newStorage.toFixed(2)),
-                storageTotalGB: data.storageTotalGB ?? prev.storageTotalGB,
-                batteryPct: data.batteryPct ?? prev.batteryPct,
-                isBoardConnected: true,
-              };
-            });
-
-            // Update physical shake progress bar when board is shaken
-            if (isPhysicalShake) {
-              setBridgeStatus((prev) => {
-                const nextProg = Math.min(100, prev.shakingProgress + 10);
-                if (nextProg >= 100 && !isOffloading) {
-                  setTimeout(() => handleTriggerOffload(), 200);
-                }
-                return {
-                  ...prev,
-                  isShaking: true,
-                  shakeIntensity: parseFloat(mag.toFixed(2)),
-                  shakingProgress: nextProg,
-                  message: `Physical Neurick shake detected (${mag.toFixed(2)}g)`,
-                  status: nextProg >= 100 ? "OFFLOADING" : "SHAKING",
-                };
-              });
-            }
-
-            return;
-          }
-        }
-        isPhysicalBoardActive = false;
-      } catch {
-        isPhysicalBoardActive = false;
-      }
-    }, 400);
-
-    // Fallback simulation when physical board is not actively transmitting
-    const simTimer = setInterval(() => {
-      if (isPhysicalBoardActive) return;
-
-      setTelemetry((prev) => {
-        let deltaX = (Math.random() - 0.5) * 0.06;
-        let deltaY = (Math.random() - 0.5) * 0.06;
-        let deltaZ = (Math.random() - 0.5) * 0.04;
-
-        if (isShaking) {
-          deltaX = (Math.random() - 0.5) * 2.2;
-          deltaY = (Math.random() - 0.5) * 1.9;
-          deltaZ = 0.5 + (Math.random() - 0.5) * 2.4;
-        }
-
-        let newStorage = prev.storageUsedGB;
-        if (autoClimb && newStorage < prev.storageTotalGB) {
-          newStorage = Math.min(prev.storageTotalGB, prev.storageUsedGB + 0.25);
-          // Sync shake progress bar as auto-fill climbs
-          const mappedProg = Math.min(100, Math.round(((newStorage - 3.8) / (28.5 - 3.8)) * 100));
-          setBridgeStatus((b) => ({
-            ...b,
-            shakingProgress: Math.max(0, mappedProg),
-            message: `Memory auto-filling (${newStorage.toFixed(2)}/32.0 GB)`,
+          // Write isBoardConnected regardless — if false, the badge flips to disconnected
+          setTelemetry((prev) => ({
+            ...prev,
+            ...(typeof data.accelX === "number" && { accelX: data.accelX }),
+            ...(typeof data.accelY === "number" && { accelY: data.accelY }),
+            ...(typeof data.accelZ === "number" && { accelZ: data.accelZ }),
+            ...(data.gyroX !== undefined && { gyroX: data.gyroX }),
+            ...(data.gyroY !== undefined && { gyroY: data.gyroY }),
+            ...(data.gyroZ !== undefined && { gyroZ: data.gyroZ }),
+            ...(data.tempC !== undefined && { tempC: data.tempC }),
+            ...(typeof data.storageUsedGB === "number" && { storageUsedGB: data.storageUsedGB }),
+            ...(data.storageTotalGB !== undefined && { storageTotalGB: data.storageTotalGB }),
+            ...(data.batteryPct !== undefined && { batteryPct: data.batteryPct }),
+            ...(typeof data.restingGravity === "number" && { restingGravity: data.restingGravity }),
+            ...(typeof data.rawX === "number" && { rawX: data.rawX }),
+            ...(typeof data.rawY === "number" && { rawY: data.rawY }),
+            ...(typeof data.rawZ === "number" && { rawZ: data.rawZ }),
+            ...(typeof data.motionIntensity === "number" && { motionIntensity: data.motionIntensity }),
+            ...(typeof data.storageKb === "number" && { storageKb: data.storageKb }),
+            ...(typeof data.maxStorageKb === "number" && { maxStorageKb: data.maxStorageKb }),
+            // Source of truth — API returns false when heartbeat is stale
+            isBoardConnected: data.isBoardConnected === true,
           }));
-
-          // When auto-fill reaches capacity threshold, automatically trigger offload!
-          if (newStorage >= 28.5 && !isOffloading) {
-            setAutoClimb(false);
-            setTimeout(() => handleTriggerOffload(), 250);
-          }
         }
-
-        return {
-          ...prev,
-          accelX: parseFloat((prev.accelX + deltaX).toFixed(2)),
-          accelY: parseFloat((prev.accelY + deltaY).toFixed(2)),
-          accelZ: parseFloat((0.98 + deltaZ).toFixed(2)),
-          storageUsedGB: parseFloat(newStorage.toFixed(2)),
-          tempC: parseFloat((38.2 + Math.random() * 0.4).toFixed(1)),
-          isBoardConnected: false,
-        };
-      });
+      } catch {
+        // Ignore
+      }
     }, 250);
 
-    return () => {
-      clearInterval(boardPoller);
-      clearInterval(simTimer);
-    };
-  }, [isShaking, autoClimb, isOffloading]);
+    return () => clearInterval(boardPoller);
+  }, []);
+
 
   const handleSimulateShake = () => {
     if (isOffloading) return;
     setIsShaking(true);
 
-    // Smoothly animate physical shake detector up and increase Local Memory Capacity
+    // Animate the shake detector UI only — storage values stay bound to live hardware
     let progress = bridgeStatus.shakingProgress || 0;
     const shakeInterval = setInterval(() => {
       progress += 15;
@@ -477,19 +416,12 @@ export default function Home() {
         message: `Physical Neurick board shake detected (${intensity.toFixed(2)}g)`,
       }));
 
-      // Directly increase Local Memory Capacity in sync with shake!
-      setTelemetry((prev) => {
-        const mappedStorage = 3.8 + (currentProg / 100) * (28.5 - 3.8);
-        return {
-          ...prev,
-          storageUsedGB: parseFloat(mappedStorage.toFixed(2)),
-        };
-      });
+      // NOTE: telemetry.storageKb / storageUsedGB are NOT touched here.
+      // Those values come exclusively from the live COM12 hardware stream.
 
       if (progress >= 100) {
         clearInterval(shakeInterval);
         setIsShaking(false);
-        // Automatically trigger Storage Offload when shake reaches 100% capacity!
         setTimeout(() => {
           handleTriggerOffload();
         }, 350);
@@ -501,9 +433,12 @@ export default function Home() {
     hasTriggeredCapacityScan.current = false;
     setAutoClimb(false);
     setIsShaking(false);
+    // Zero out KB-based storage — hardware will immediately report real values once the
+    // 'r' reset command is processed by the ESP32 board via edge_node.py
     setTelemetry((prev) => ({
       ...prev,
-      storageUsedGB: 3.8,
+      storageKb: 0,
+      storageUsedGB: 0,
     }));
     setBridgeStatus((prev) => ({
       ...prev,
@@ -516,7 +451,7 @@ export default function Home() {
     fetch("/api/telemetry", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ storageUsedGB: 3.8, resetStorage: true }),
+      body: JSON.stringify({ storageKb: 0, storageUsedGB: 0, resetStorage: true }),
     }).catch(() => {});
 
     fetch("/api/bridge-status", {
@@ -669,9 +604,11 @@ export default function Home() {
 
           setFinalTxHash(paidTx.full);
 
+          // After offload, zero out storage counters — hardware reports real post-reset values
           setTelemetry((prev) => ({
             ...prev,
-            storageUsedGB: 3.8,
+            storageKb: 0,
+            storageUsedGB: 0,
           }));
           setBridgeStatus((prev) => ({
             ...prev,
@@ -687,7 +624,7 @@ export default function Home() {
           fetch("/api/telemetry", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ storageUsedGB: 3.8, resetStorage: true }),
+            body: JSON.stringify({ storageKb: 0, storageUsedGB: 0, resetStorage: true }),
           }).catch(() => {});
           fetch("/api/bridge-status", {
             method: "POST",
@@ -881,19 +818,32 @@ export default function Home() {
           {/* Column 1: Robot Telemetry (for Operator) OR Storage Vault (for Host) */}
           <div className="flex flex-col">
             {userRole === "operator" ? (
-              <RobotPanel
-                telemetry={telemetry}
-                onTriggerOffload={() => handleTriggerOffload()}
-                isOffloading={isOffloading}
-                onSimulateShake={handleSimulateShake}
-                onResetStorage={handleResetStorage}
-                onToggleAutoClimb={() => setAutoClimb(!autoClimb)}
-                autoClimb={autoClimb}
-                shakingProgress={bridgeStatus.shakingProgress}
-                finalTxHash={finalTxHash || bridgeStatus.txHash}
-                shakeIntensity={bridgeStatus.shakeIntensity}
-                bridgeStatusMessage={bridgeStatus.message}
-              />
+              <div className="flex flex-col gap-4">
+                <RobotPanel
+                  telemetry={telemetry}
+                  onTriggerOffload={() => handleTriggerOffload()}
+                  isOffloading={isOffloading}
+                  onSimulateShake={handleSimulateShake}
+                  onResetStorage={handleResetStorage}
+                  onToggleAutoClimb={() => setAutoClimb(!autoClimb)}
+                  autoClimb={autoClimb}
+                  shakingProgress={bridgeStatus.shakingProgress}
+                  finalTxHash={finalTxHash || bridgeStatus.txHash}
+                  shakeIntensity={bridgeStatus.shakeIntensity}
+                  bridgeStatusMessage={bridgeStatus.message}
+                />
+
+                {/* Windows Command Prompt / Serial Terminal Console */}
+                <CommandPromptTerminal
+                  telemetry={telemetry}
+                  isBoardConnected={telemetry.isBoardConnected}
+                  terminalLogs={bridgeStatus.terminalLogs || []}
+                  shakingProgress={bridgeStatus.shakingProgress}
+                  shakeIntensity={bridgeStatus.shakeIntensity}
+                  isShaking={bridgeStatus.isShaking || isShaking}
+                  onSimulateShake={handleSimulateShake}
+                />
+              </div>
             ) : (
               <StorageVaultPanel
                 vaultFiles={vaultFiles}

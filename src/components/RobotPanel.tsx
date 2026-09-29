@@ -13,7 +13,8 @@ import {
   Move3d,
   Layers,
   Sparkles,
-  ArrowUpRight
+  ArrowUpRight,
+  Terminal
 } from "lucide-react";
 
 interface RobotPanelProps {
@@ -81,23 +82,53 @@ export const RobotPanel: React.FC<RobotPanelProps> = ({
             </div>
           </div>
 
-          <div
-            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border ${
-              telemetry.isBoardConnected
-                ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                : "bg-blue-50 text-blue-700 border-blue-200"
-            }`}
-          >
-            <span
-              className={`w-2 h-2 rounded-full ${
+          <div className="flex items-center gap-2">
+            <div
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border transition-all ${
                 telemetry.isBoardConnected
-                  ? "bg-emerald-500 animate-pulse"
-                  : "bg-blue-500"
+                  ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                  : "bg-rose-50 text-rose-700 border-rose-200"
               }`}
-            />
-            <span>{telemetry.isBoardConnected ? "Neurick Hardware Live" : "Neurick Online"}</span>
+            >
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  telemetry.isBoardConnected
+                    ? "bg-emerald-500 animate-pulse"
+                    : "bg-rose-500"
+                }`}
+              />
+              <span>{telemetry.isBoardConnected ? "Neurick Hardware Live (COM12)" : "Neurick Offline (COM12)"}</span>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => {
+                const el = document.getElementById("cmd-terminal");
+                if (el) el.scrollIntoView({ behavior: "smooth" });
+              }}
+              className="flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold border bg-slate-900 hover:bg-slate-800 text-cyan-400 border-slate-700 transition-colors cursor-pointer shadow-xs"
+              title="Jump to live Command Prompt terminal"
+            >
+              <Terminal className="w-3 h-3 text-cyan-400" />
+              <span>CMD Console</span>
+            </button>
           </div>
         </div>
+
+        {/* Offline Warning Banner when Hardware is disconnected */}
+        {!telemetry.isBoardConnected && (
+          <div className="mt-3 p-2.5 bg-rose-50/70 border border-rose-200/80 rounded-xl text-xs text-rose-800 flex items-start gap-2">
+            <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+            <div>
+              <span className="font-semibold block text-[11px] uppercase tracking-wide font-mono text-rose-900">
+                Hardware Kit Disconnected
+              </span>
+              <p className="text-[11px] text-rose-700 mt-0.5 leading-relaxed">
+                Connect the ESP32-S3 via USB to <span className="font-mono font-semibold">COM12</span> and run <code className="bg-rose-100 px-1 py-0.2 rounded font-mono text-rose-900">python edge_node.py</code> to initialize the live terminal.
+              </p>
+            </div>
+          </div>
+        )}
 
         {/* Device Metadata Pill */}
         <div className="mt-4 grid grid-cols-3 gap-2 p-2.5 bg-slate-50 rounded-xl border border-slate-200/70 text-center">
